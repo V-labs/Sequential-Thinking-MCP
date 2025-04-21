@@ -15,12 +15,18 @@ import * as path from 'path';
 // Configuration pour les logs
 const LOGS_DIR = '/tmp/mcp-logs';
 const SERVER_LOG = path.join(LOGS_DIR, 'server-debug.log');
+const RESPONSE_DIR = path.join(LOGS_DIR, 'responses');
 
 // Fonction pour écrire dans le fichier de log
 function logToFile(message: string): void {
   // S'assurer que le répertoire existe
   if (!fs.existsSync(LOGS_DIR)) {
     fs.mkdirSync(LOGS_DIR, { recursive: true });
+  }
+  
+  // S'assurer que le répertoire des réponses existe
+  if (!fs.existsSync(RESPONSE_DIR)) {
+    fs.mkdirSync(RESPONSE_DIR, { recursive: true });
   }
   
   const timestamp = new Date().toISOString();
@@ -31,6 +37,22 @@ function logToFile(message: string): void {
   
   // Aussi afficher dans la console pour le debug
   console.error(`[DEBUG] ${message}`);
+}
+
+// Fonction pour sauvegarder la réponse dans un fichier
+function saveResponseToFile(requestId: string, response: any): void {
+  try {
+    if (!requestId) {
+      logToFile('Tentative de sauvegarde d\'une réponse sans ID de requête');
+      return;
+    }
+    
+    const responseFilePath = path.join(RESPONSE_DIR, `${requestId}.json`);
+    fs.writeFileSync(responseFilePath, JSON.stringify(response, null, 2));
+    logToFile(`Réponse sauvegardée dans le fichier: ${responseFilePath}`);
+  } catch (error) {
+    logToFile(`Erreur lors de la sauvegarde de la réponse: ${error}`);
+  }
 }
 
 interface ThoughtData {
@@ -295,6 +317,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   logToFile(`Requête d'appel d'outil reçue: ${JSON.stringify(request)}`);
+  // Extraire ou générer un ID pour cette requête
+  const requestId = (request as any).id || `req-${Date.now()}`;
   
   if (request.params.name === "sequentialthinking") {
     logToFile(`Traitement de l'outil sequentialthinking avec les arguments: ${JSON.stringify(request.params.arguments)}`);
@@ -304,6 +328,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (request.params._meta?.progressToken) {
       logToFile(`Traitement terminé pour la requête avec progressToken: ${request.params._meta.progressToken}`);
     }
+    
+    // Sauvegarder la réponse dans un fichier avec l'ID de la requête
+    saveResponseToFile(requestId, { 
+      ...result,
+      id: requestId,
+      jsonrpc: "2.0",
+      params: request.params
+    });
     
     return result;
   }

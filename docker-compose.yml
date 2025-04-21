@@ -1,6 +1,7 @@
 version: '3'
 
 services:
+  # Service MCP standard (mode stdio)
   mcp-server:
     build: ./mcp-server
     restart: unless-stopped
@@ -11,6 +12,30 @@ services:
     # Ajout de labels pour Traefik/Coolify
     labels:
       - "traefik.enable=true"
+  
+  # Service MCP en mode daemon (HTTP)
+  mcp-daemon:
+    build: ./mcp-server
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - MCP_DAEMON_PORT=3030
+    command: node dist/daemon.js
+    ports:
+      - "3030:3030"
+    volumes:
+      - mcp-logs:/tmp/mcp-logs
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3030/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Ajout de labels pour Traefik/Coolify
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.mcp-daemon.loadbalancer.server.port=3030"
 
   mcp-api:
     build: ./mcp-api
@@ -21,9 +46,13 @@ services:
       - mcp-logs:/tmp/mcp-logs
     depends_on:
       - mcp-server
+      - mcp-daemon
     environment:
       - NODE_ENV=production
       - PORT=3000
+      - USE_MCP_DAEMON=true
+      - MCP_DAEMON_HOST=mcp-daemon
+      - MCP_DAEMON_PORT=3030
       # Configurer CORS pour autoriser les appels externes (peut être plus restrictif en production)
       - CORS_ALLOW_ORIGIN=*
     networks:

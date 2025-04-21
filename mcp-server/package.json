@@ -1,16 +1,17 @@
 {
   "name": "mcp-server",
-  "version": "1.0.0",
+  "version": "0.3.0",
   "description": "Sequential Thinking MCP Server",
-  "main": "dist/index.js",
   "type": "module",
+  "main": "index.ts",
   "scripts": {
+    "start": "ts-node index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "daemon": "ts-node daemon.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "chalk": "^5.0.0"
+    "@modelcontextprotocol/sdk": "^1.10.1",
+    "chalk": "^4.1.2"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",

@@ -1,4 +1,122 @@
-# Déploiement du serveur MCP et intégration avec des systèmes externes
+# Guide de déploiement pour Sequential Thinking MCP
+
+Ce document explique comment déployer correctement les services MCP Sequential Thinking en production.
+
+## Prérequis
+
+- Docker et Docker Compose installés
+- Git pour récupérer le code source
+
+## Structure du projet
+
+Le projet est composé de trois services principaux :
+
+1. **mcp-server** : Serveur MCP en mode stdio standard
+2. **mcp-daemon** : Serveur MCP en mode daemon (HTTP)
+3. **mcp-api** : API REST qui sert d'intermédiaire entre les clients et les serveurs MCP
+
+## Configuration importante
+
+### Mode ES Modules
+
+Le serveur MCP utilise les ES Modules (`type: "module"` dans package.json) pour pouvoir importer correctement les dépendances ESM comme `@modelcontextprotocol/sdk`.
+
+### Docker et gestion des commandes
+
+Dans le fichier `mcp-server/Dockerfile`, nous utilisons `CMD` au lieu de `ENTRYPOINT` pour permettre au docker-compose de remplacer la commande par défaut pour le service daemon.
+
+## Déploiement
+
+1. Clonez le dépôt :
+   ```
+   git clone <URL_DU_REPO>
+   cd sequential-thinking-mcp
+   ```
+
+2. Construction des images :
+   ```
+   docker-compose build
+   ```
+
+3. Démarrage des services :
+   ```
+   docker-compose up -d
+   ```
+
+4. Vérification que les services fonctionnent :
+   ```
+   # Vérifier le statut du daemon
+   curl http://localhost:3030/status
+   
+   # Vérifier le statut de l'API
+   curl http://localhost:3000/api/status
+   ```
+
+## Points importants pour le déploiement
+
+1. **Conteneur daemon** : Assurez-vous que le conteneur `mcp-daemon` démarre correctement. Il utilise la commande `node dist/daemon.js` spécifiée dans le docker-compose.yml.
+
+2. **Volume partagé** : Les trois services partagent un volume Docker pour les logs et la communication. Assurez-vous que les permissions sont correctes.
+
+3. **Variables d'environnement** : Le service `mcp-api` nécessite que les variables d'environnement spécifient correctement l'hôte et le port du daemon.
+
+## Dépannage
+
+### Le conteneur daemon ne démarre pas
+
+Si le conteneur daemon ne démarre pas, vérifiez les points suivants :
+
+1. Assurez-vous que la compilation TypeScript s'est bien déroulée lors de la construction de l'image
+2. Vérifiez que le fichier `mcp-server/package.json` contient `"type": "module"`
+3. Assurez-vous que le Dockerfile n'a qu'une seule instruction `CMD` (évitez les conflits)
+
+### L'API n'arrive pas à communiquer avec le daemon
+
+1. Vérifiez que les deux conteneurs sont dans le même réseau Docker
+2. Assurez-vous que l'API utilise le bon nom d'hôte et port pour le daemon
+3. Vérifiez les logs du daemon pour vous assurer qu'il écoute sur le bon port
+
+## Mise à jour et maintenance
+
+Pour mettre à jour les services :
+
+1. Arrêtez les conteneurs :
+   ```
+   docker-compose down
+   ```
+
+2. Tirez les dernières modifications :
+   ```
+   git pull
+   ```
+
+3. Reconstruisez les images :
+   ```
+   docker-compose build
+   ```
+
+4. Redémarrez les services :
+   ```
+   docker-compose up -d
+   ```
+
+## Tests de validation après déploiement
+
+Après le déploiement, vous pouvez exécuter ce test rapide pour valider que tout fonctionne :
+
+```bash
+curl -X POST "http://localhost:3000/api/request" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"sequentialthinking","arguments":{"thought":"Test de déploiement","thoughtNumber":1,"totalThoughts":1,"nextThoughtNeeded":false}},"id":"test-deploy-1"}'
+```
+
+Puis vérifiez la réponse :
+
+```bash
+curl "http://localhost:3000/api/response/test-deploy-1"
+```
+
+## Déploiement du serveur MCP et intégration avec des systèmes externes
 
 Ce document explique comment déployer le serveur MCP avec son API et l'intégrer avec des systèmes externes comme n8n, permettant une surveillance et un redémarrage automatiques du serveur.
 
@@ -17,12 +135,6 @@ La solution comprend:
    - Surveille l'état du serveur MCP via l'API
    - Redémarre le serveur si nécessaire
    - Expose des webhooks pour interagir avec le serveur MCP depuis l'extérieur
-
-## Prérequis
-
-- Docker et Docker Compose
-- Git pour gérer le code source
-- Un système d'intégration (optionnel, ex: n8n, Zapier, etc.)
 
 ## Étape 1: Installation
 

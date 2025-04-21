@@ -3,6 +3,62 @@ const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
+const http = require('http');
+const https = require('https');
+
+// Fonction pour faire une requête HTTP avec les modules natifs de Node.js
+async function fetchWithHttp(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith('https') ? https : http;
+    const method = options.method || 'GET';
+    
+    const requestOptions = {
+      method,
+      headers: options.headers || {},
+    };
+    
+    const req = lib.request(url, requestOptions, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        return reject(new Error(`Statut HTTP: ${res.statusCode}`));
+      }
+      
+      const data = [];
+      res.on('data', chunk => {
+        data.push(chunk);
+      });
+      
+      res.on('end', () => {
+        const body = Buffer.concat(data).toString();
+        try {
+          const json = JSON.parse(body);
+          resolve({ 
+            ok: true, 
+            status: res.statusCode,
+            json: () => Promise.resolve(json),
+            text: () => Promise.resolve(body)
+          });
+        } catch (e) {
+          resolve({ 
+            ok: true, 
+            status: res.statusCode,
+            json: () => Promise.reject(new Error('Invalid JSON')),
+            text: () => Promise.resolve(body)
+          });
+        }
+      });
+    });
+    
+    req.on('error', (err) => {
+      reject(err);
+    });
+    
+    if (options.body) {
+      req.write(typeof options.body === 'string' ? options.body : JSON.stringify(options.body));
+    }
+    
+    req.end();
+  });
+}
 
 const app = express();
 app.use(cors());
@@ -15,8 +71,12 @@ const INPUT_FIFO = path.join(LOGS_DIR, 'mcp-input.fifo');
 const OUTPUT_LOG = path.join(LOGS_DIR, 'mcp-output.log');
 const ERROR_LOG = path.join(LOGS_DIR, 'mcp-error.log');
 const PID_FILE = path.join(LOGS_DIR, 'mcp.pid');
+const DAEMON_PID_FILE = path.join(LOGS_DIR, 'daemon.pid');
 const STATUS_FILE = path.join(LOGS_DIR, 'status.json');
 const RESPONSES_FILE = path.join(LOGS_DIR, 'responses.json');
+const DAEMON_HOST = process.env.MCP_DAEMON_HOST || 'localhost';
+const DAEMON_PORT = process.env.MCP_DAEMON_PORT || 3030;
+const USE_DAEMON = process.env.USE_MCP_DAEMON === 'true';
 
 // Fonctions utilitaires
 function logWithTimestamp(message) {
@@ -60,15 +120,37 @@ function storeResponse(requestId, response) {
 
 // Fonction pour récupérer une réponse stockée
 function getStoredResponse(requestId) {
+  // D'abord vérifier dans le fichier de stockage des réponses
   if (fs.existsSync(RESPONSES_FILE)) {
     try {
       const responses = JSON.parse(fs.readFileSync(RESPONSES_FILE, 'utf8'));
-      return responses[requestId];
+      if (responses[requestId]) {
+        logWithTimestamp(`Réponse trouvée dans le fichier de stockage pour l'ID: ${requestId}`);
+        return responses[requestId];
+      }
     } catch (err) {
       logWithTimestamp(`Erreur lors de la lecture des réponses: ${err.message}`);
-      return null;
     }
   }
+  
+  // Ensuite, vérifier si une réponse a été écrite par le serveur MCP
+  const responseDir = path.join(LOGS_DIR, 'responses');
+  const responseFile = path.join(responseDir, `${requestId}.json`);
+  
+  if (fs.existsSync(responseFile)) {
+    try {
+      const responseData = JSON.parse(fs.readFileSync(responseFile, 'utf8'));
+      logWithTimestamp(`Réponse trouvée dans le fichier de réponse du serveur MCP pour l'ID: ${requestId}`);
+      
+      // Stocker cette réponse dans notre système pour les futures requêtes
+      storeResponse(requestId, responseData);
+      
+      return responseData;
+    } catch (err) {
+      logWithTimestamp(`Erreur lors de la lecture du fichier de réponse du serveur MCP: ${err.message}`);
+    }
+  }
+  
   return null;
 }
 
@@ -88,6 +170,38 @@ function isServerRunning() {
     }
   }
   return false;
+}
+
+// Fonction pour vérifier si le daemon est en cours d'exécution
+function isDaemonRunning() {
+  if (fs.existsSync(DAEMON_PID_FILE)) {
+    try {
+      const pid = parseInt(fs.readFileSync(DAEMON_PID_FILE, 'utf-8').trim());
+      try {
+        process.kill(pid, 0); // Signal 0 vérifie juste si le processus existe
+        return true;
+      } catch (e) {
+        return false; // Processus n'existe pas
+      }
+    } catch (err) {
+      return false;
+    }
+  }
+  return false;
+}
+
+// Fonction pour vérifier le statut du daemon via HTTP
+async function checkDaemonStatus() {
+  try {
+    const response = await fetchWithHttp(`http://${DAEMON_HOST}:${DAEMON_PORT}/status`);
+    if (response.ok) {
+      return await response.json();
+    }
+    return null;
+  } catch (err) {
+    logWithTimestamp(`Erreur lors de la vérification du statut du daemon: ${err.message}`);
+    return null;
+  }
 }
 
 // Mettre à jour le statut
@@ -220,43 +334,56 @@ app.post('/api/start', (req, res) => {
     let outputBuffer = '';
     mcpProcess.stdout.on('data', (data) => {
       const text = data.toString();
-      logWithTimestamp(`MCP output: ${text.trim()}`);
+      outputStream.write(text);
+      logWithTimestamp(`MCP stdout: ${text.trim()}`);
       
-      // Chercher des objets JSON complets
+      // Rechercher spécifiquement des objets JSON complets
       outputBuffer += text;
-      try {
-        let jsonStartPos = outputBuffer.indexOf('{');
-        while(jsonStartPos !== -1) {
+      
+      // Utiliser une expression régulière pour trouver des objets JSON valides
+      const jsonPattern = /\{(?:[^{}]|(?:\{(?:[^{}]|(?:\{[^{}]*\}))*\}))*\}/g;
+      const jsonMatches = outputBuffer.match(jsonPattern);
+      
+      if (jsonMatches) {
+        for (const jsonStr of jsonMatches) {
           try {
-            const possibleJson = outputBuffer.substring(jsonStartPos);
-            const jsonObj = JSON.parse(possibleJson);
+            const jsonObj = JSON.parse(jsonStr);
             
-            // Stocker la réponse si elle a un ID
+            // Si l'objet JSON a un ID, c'est une réponse à une requête
             if (jsonObj.id) {
-              logWithTimestamp(`Réponse JSON détectée pour l'ID: ${jsonObj.id}`);
+              logWithTimestamp(`Réponse JSON complète détectée pour l'ID: ${jsonObj.id}`);
               storeResponse(jsonObj.id, jsonObj);
-            } else {
-              logWithTimestamp(`Réponse JSON sans ID détectée: ${JSON.stringify(jsonObj).substring(0, 200)}`);
+              
+              // Supprimer ce JSON du buffer
+              outputBuffer = outputBuffer.replace(jsonStr, '');
+            } 
+            // Si l'objet JSON a un résultat sans ID, associer à la dernière requête
+            else if (jsonObj.result) {
+              try {
+                const lastRequestId = fs.readFileSync(path.join(LOGS_DIR, 'last-request-id.txt'), 'utf8').trim();
+                if (lastRequestId) {
+                  logWithTimestamp(`Réponse JSON sans ID associée à la requête: ${lastRequestId}`);
+                  jsonObj.id = lastRequestId; // Ajouter l'ID
+                  storeResponse(lastRequestId, jsonObj);
+                  
+                  // Supprimer ce JSON du buffer
+                  outputBuffer = outputBuffer.replace(jsonStr, '');
+                }
+              } catch (err) {
+                logWithTimestamp(`Erreur lors de la lecture du dernier ID de requête: ${err.message}`);
+              }
             }
-            
-            updateStatus('processed_response');
-            
-            // Supprimer ce JSON du buffer
-            outputBuffer = outputBuffer.substring(jsonStartPos + possibleJson.length);
-            jsonStartPos = outputBuffer.indexOf('{');
-          } catch(e) {
-            // JSON incomplet ou malformé
-            jsonStartPos = outputBuffer.indexOf('{', jsonStartPos + 1);
+          } catch (err) {
+            // JSON invalide, continuer
           }
         }
-      } catch(e) {
-        // Ignorer les erreurs de parsing
       }
     });
     
     // Ajouter des logs pour stderr aussi
     mcpProcess.stderr.on('data', (data) => {
       const text = data.toString();
+      errorStream.write(text);
       logWithTimestamp(`MCP stderr: ${text.trim()}`);
     });
     
@@ -325,11 +452,20 @@ app.post('/api/request', (req, res) => {
     const request = req.body;
     
     // Valider la requête de base
-    if (!request.jsonrpc || !request.method || !request.id) {
+    if (!request.jsonrpc || !request.id) {
       return res.status(400).json({ 
-        error: 'Format de requête JSON-RPC invalide. Doit contenir jsonrpc, method et id' 
+        error: 'Format de requête JSON-RPC invalide. Doit contenir jsonrpc et id' 
       });
     }
+    
+    // S'assurer que la méthode est correcte
+    if (request.method !== 'tools/call') {
+      request.method = 'tools/call';
+      logWithTimestamp(`Méthode JSON-RPC corrigée à 'tools/call'`);
+    }
+    
+    // Sauvegarder l'ID de la requête actuelle pour référence
+    fs.writeFileSync(path.join(LOGS_DIR, 'last-request-id.txt'), request.id);
     
     // Créer une réponse temporaire pour indiquer que la requête est en cours de traitement
     storeResponse(request.id, {
@@ -337,6 +473,42 @@ app.post('/api/request', (req, res) => {
       status: "processing"
     });
     
+    // Si le mode daemon est activé, on utilise HTTP au lieu de stdio
+    if (USE_DAEMON && isDaemonRunning()) {
+      logWithTimestamp('Utilisation du serveur MCP en mode daemon');
+      
+      // Envoyer la requête au daemon via HTTP
+      fetchWithHttp(`http://${DAEMON_HOST}:${DAEMON_PORT}/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(request)
+      })
+      .then(response => response.json())
+      .then(data => {
+        logWithTimestamp(`Réponse du daemon reçue pour ID=${request.id}`);
+        storeResponse(request.id, data);
+        updateStatus('processed_daemon_response');
+      })
+      .catch(error => {
+        logWithTimestamp(`Erreur lors de la communication avec le daemon: ${error.message}`);
+        storeResponse(request.id, {
+          result: `Erreur lors de la communication avec le daemon: ${error.message}`,
+          status: "error"
+        });
+      });
+      
+      // Répondre immédiatement
+      return res.json({
+        success: true,
+        message: 'Requête envoyée au serveur MCP daemon',
+        requestId: request.id,
+        mode: 'daemon'
+      });
+    }
+    
+    // Si le daemon n'est pas utilisé ou n'est pas en cours d'exécution, on utilise le mode stdio standard
     // Vérifier si le serveur est en cours d'exécution et le démarrer si nécessaire
     if (!isServerRunning()) {
       logWithTimestamp('Le serveur MCP n\'est pas en cours d\'exécution. Démarrage automatique...');
@@ -388,37 +560,48 @@ app.post('/api/request', (req, res) => {
       mcpProcess.stdout.on('data', (data) => {
         const text = data.toString();
         outputStream.write(text);
-        logWithTimestamp(`MCP output: ${text.trim()}`);
+        logWithTimestamp(`MCP stdout: ${text.trim()}`);
         
-        // Chercher des objets JSON complets
+        // Rechercher spécifiquement des objets JSON complets
         outputBuffer += text;
-        try {
-          let jsonStartPos = outputBuffer.indexOf('{');
-          while(jsonStartPos !== -1) {
+        
+        // Utiliser une expression régulière pour trouver des objets JSON valides
+        const jsonPattern = /\{(?:[^{}]|(?:\{(?:[^{}]|(?:\{[^{}]*\}))*\}))*\}/g;
+        const jsonMatches = outputBuffer.match(jsonPattern);
+        
+        if (jsonMatches) {
+          for (const jsonStr of jsonMatches) {
             try {
-              const possibleJson = outputBuffer.substring(jsonStartPos);
-              const jsonObj = JSON.parse(possibleJson);
+              const jsonObj = JSON.parse(jsonStr);
               
-              // Stocker la réponse si elle a un ID
+              // Si l'objet JSON a un ID, c'est une réponse à une requête
               if (jsonObj.id) {
-                logWithTimestamp(`Réponse JSON détectée pour l'ID: ${jsonObj.id}`);
+                logWithTimestamp(`Réponse JSON complète détectée pour l'ID: ${jsonObj.id}`);
                 storeResponse(jsonObj.id, jsonObj);
-              } else {
-                logWithTimestamp(`Réponse JSON sans ID détectée: ${JSON.stringify(jsonObj).substring(0, 200)}`);
+                
+                // Supprimer ce JSON du buffer
+                outputBuffer = outputBuffer.replace(jsonStr, '');
+              } 
+              // Si l'objet JSON a un résultat sans ID, associer à la dernière requête
+              else if (jsonObj.result) {
+                try {
+                  const lastRequestId = fs.readFileSync(path.join(LOGS_DIR, 'last-request-id.txt'), 'utf8').trim();
+                  if (lastRequestId) {
+                    logWithTimestamp(`Réponse JSON sans ID associée à la requête: ${lastRequestId}`);
+                    jsonObj.id = lastRequestId; // Ajouter l'ID
+                    storeResponse(lastRequestId, jsonObj);
+                    
+                    // Supprimer ce JSON du buffer
+                    outputBuffer = outputBuffer.replace(jsonStr, '');
+                  }
+                } catch (err) {
+                  logWithTimestamp(`Erreur lors de la lecture du dernier ID de requête: ${err.message}`);
+                }
               }
-              
-              updateStatus('processed_response');
-              
-              // Supprimer ce JSON du buffer
-              outputBuffer = outputBuffer.substring(jsonStartPos + possibleJson.length);
-              jsonStartPos = outputBuffer.indexOf('{');
-            } catch(e) {
-              // JSON incomplet ou malformé
-              jsonStartPos = outputBuffer.indexOf('{', jsonStartPos + 1);
+            } catch (err) {
+              // JSON invalide, continuer
             }
           }
-        } catch(e) {
-          // Ignorer les erreurs de parsing
         }
       });
       
