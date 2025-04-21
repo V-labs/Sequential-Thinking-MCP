@@ -16,6 +16,7 @@ const OUTPUT_LOG = path.join(LOGS_DIR, 'mcp-output.log');
 const ERROR_LOG = path.join(LOGS_DIR, 'mcp-error.log');
 const PID_FILE = path.join(LOGS_DIR, 'mcp.pid');
 const STATUS_FILE = path.join(LOGS_DIR, 'status.json');
+const RESPONSES_FILE = path.join(LOGS_DIR, 'responses.json');
 
 // Fonctions utilitaires
 function logWithTimestamp(message) {
@@ -27,6 +28,48 @@ function logWithTimestamp(message) {
 if (!fs.existsSync(LOGS_DIR)) {
   fs.mkdirSync(LOGS_DIR, { recursive: true });
   logWithTimestamp(`Répertoire créé: ${LOGS_DIR}`);
+}
+
+// Fonction pour stocker une réponse
+function storeResponse(requestId, response) {
+  let responses = {};
+  
+  // Charger les réponses existantes si le fichier existe
+  if (fs.existsSync(RESPONSES_FILE)) {
+    try {
+      responses = JSON.parse(fs.readFileSync(RESPONSES_FILE, 'utf8'));
+    } catch (err) {
+      logWithTimestamp(`Erreur lors de la lecture des réponses: ${err.message}`);
+      responses = {};
+    }
+  }
+  
+  // Ajouter la nouvelle réponse
+  responses[requestId] = {
+    timestamp: new Date().toISOString(),
+    result: response.result || response,
+    nextThoughtNeeded: response.params?.arguments?.nextThoughtNeeded !== false
+  };
+  
+  // Sauvegarder le fichier
+  fs.writeFileSync(RESPONSES_FILE, JSON.stringify(responses, null, 2));
+  logWithTimestamp(`Réponse stockée pour l'ID: ${requestId}`);
+  
+  return responses[requestId];
+}
+
+// Fonction pour récupérer une réponse stockée
+function getStoredResponse(requestId) {
+  if (fs.existsSync(RESPONSES_FILE)) {
+    try {
+      const responses = JSON.parse(fs.readFileSync(RESPONSES_FILE, 'utf8'));
+      return responses[requestId];
+    } catch (err) {
+      logWithTimestamp(`Erreur lors de la lecture des réponses: ${err.message}`);
+      return null;
+    }
+  }
+  return null;
 }
 
 // Vérifier si le serveur MCP est en cours d'exécution
@@ -177,6 +220,7 @@ app.post('/api/start', (req, res) => {
     let outputBuffer = '';
     mcpProcess.stdout.on('data', (data) => {
       const text = data.toString();
+      logWithTimestamp(`MCP output: ${text.trim()}`);
       
       // Chercher des objets JSON complets
       outputBuffer += text;
@@ -185,7 +229,15 @@ app.post('/api/start', (req, res) => {
         while(jsonStartPos !== -1) {
           try {
             const possibleJson = outputBuffer.substring(jsonStartPos);
-            JSON.parse(possibleJson);
+            const jsonObj = JSON.parse(possibleJson);
+            
+            // Stocker la réponse si elle a un ID
+            if (jsonObj.id) {
+              logWithTimestamp(`Réponse JSON détectée pour l'ID: ${jsonObj.id}`);
+              storeResponse(jsonObj.id, jsonObj);
+            } else {
+              logWithTimestamp(`Réponse JSON sans ID détectée: ${JSON.stringify(jsonObj).substring(0, 200)}`);
+            }
             
             updateStatus('processed_response');
             
@@ -200,6 +252,12 @@ app.post('/api/start', (req, res) => {
       } catch(e) {
         // Ignorer les erreurs de parsing
       }
+    });
+    
+    // Ajouter des logs pour stderr aussi
+    mcpProcess.stderr.on('data', (data) => {
+      const text = data.toString();
+      logWithTimestamp(`MCP stderr: ${text.trim()}`);
     });
     
     // Gérer la fin du processus
@@ -273,6 +331,12 @@ app.post('/api/request', (req, res) => {
       });
     }
     
+    // Créer une réponse temporaire pour indiquer que la requête est en cours de traitement
+    storeResponse(request.id, {
+      result: "Requête en cours de traitement...",
+      status: "processing"
+    });
+    
     // Vérifier si le serveur est en cours d'exécution et le démarrer si nécessaire
     if (!isServerRunning()) {
       logWithTimestamp('Le serveur MCP n\'est pas en cours d\'exécution. Démarrage automatique...');
@@ -319,10 +383,12 @@ app.post('/api/request', (req, res) => {
       mcpProcess.stdout.pipe(outputStream);
       mcpProcess.stderr.pipe(errorStream);
       
-      // Gérer la sortie pour mise à jour du statut
+      // Gérer la sortie pour mise à jour du statut et capture des réponses
       let outputBuffer = '';
       mcpProcess.stdout.on('data', (data) => {
         const text = data.toString();
+        outputStream.write(text);
+        logWithTimestamp(`MCP output: ${text.trim()}`);
         
         // Chercher des objets JSON complets
         outputBuffer += text;
@@ -331,7 +397,15 @@ app.post('/api/request', (req, res) => {
           while(jsonStartPos !== -1) {
             try {
               const possibleJson = outputBuffer.substring(jsonStartPos);
-              JSON.parse(possibleJson);
+              const jsonObj = JSON.parse(possibleJson);
+              
+              // Stocker la réponse si elle a un ID
+              if (jsonObj.id) {
+                logWithTimestamp(`Réponse JSON détectée pour l'ID: ${jsonObj.id}`);
+                storeResponse(jsonObj.id, jsonObj);
+              } else {
+                logWithTimestamp(`Réponse JSON sans ID détectée: ${JSON.stringify(jsonObj).substring(0, 200)}`);
+              }
               
               updateStatus('processed_response');
               
@@ -348,6 +422,13 @@ app.post('/api/request', (req, res) => {
         }
       });
       
+      // Ajouter des logs pour stderr aussi
+      mcpProcess.stderr.on('data', (data) => {
+        const text = data.toString();
+        errorStream.write(text);
+        logWithTimestamp(`MCP stderr: ${text.trim()}`);
+      });
+      
       // Gérer la fin du processus
       mcpProcess.on('exit', (code) => {
         logWithTimestamp(`Processus MCP terminé avec le code: ${code}`);
@@ -356,10 +437,27 @@ app.post('/api/request', (req, res) => {
         // Si le code de sortie est 0 (sortie normale), préparer le redémarrage à la prochaine requête
         if (code === 0) {
           logWithTimestamp("Le serveur MCP s'est terminé normalement après avoir traité une requête.");
+          
+          // Si aucune réponse n'a été capturée, ajouter une réponse par défaut
+          const storedResponse = getStoredResponse(request.id);
+          if (storedResponse && storedResponse.status === "processing") {
+            storeResponse(request.id, {
+              result: "Le serveur a traité la requête mais n'a pas produit de réponse JSON-RPC",
+              status: "completed"
+            });
+          }
+          
           cleanup();
         } else {
           // En cas d'erreur, nettoyer complètement
           logWithTimestamp(`Le serveur MCP s'est terminé avec une erreur (code ${code}).`);
+          
+          // Mettre à jour la réponse avec l'erreur
+          storeResponse(request.id, {
+            result: `Le serveur MCP s'est terminé avec une erreur (code ${code})`,
+            status: "error"
+          });
+          
           cleanup();
         }
       });
@@ -374,7 +472,9 @@ app.post('/api/request', (req, res) => {
       setTimeout(() => {
         // Écrire dans le FIFO
         try {
-          fs.writeFileSync(INPUT_FIFO, JSON.stringify(request));
+          const jsonRequest = JSON.stringify(request, null, 2);
+          logWithTimestamp(`Envoi de la requête: ${jsonRequest}`);
+          fs.writeFileSync(INPUT_FIFO, jsonRequest);
           logWithTimestamp(`Requête envoyée: ID=${request.id}`);
           
           res.json({ 
@@ -383,6 +483,7 @@ app.post('/api/request', (req, res) => {
             requestId: request.id
           });
         } catch (error) {
+          logWithTimestamp(`Erreur lors de l'envoi de la requête: ${error.message}`);
           res.status(500).json({ error: `Erreur lors de l'envoi de la requête: ${error.message}` });
         }
       }, 1000);
@@ -391,14 +492,21 @@ app.post('/api/request', (req, res) => {
     }
     
     // Écrire dans le FIFO si le serveur est déjà en cours d'exécution
-    fs.writeFileSync(INPUT_FIFO, JSON.stringify(request));
-    logWithTimestamp(`Requête envoyée: ID=${request.id}`);
-    
-    res.json({ 
-      success: true, 
-      message: 'Requête envoyée au serveur MCP',
-      requestId: request.id
-    });
+    try {
+      const jsonRequest = JSON.stringify(request, null, 2);
+      logWithTimestamp(`Envoi de la requête: ${jsonRequest}`);
+      fs.writeFileSync(INPUT_FIFO, jsonRequest);
+      logWithTimestamp(`Requête envoyée: ID=${request.id}`);
+      
+      res.json({ 
+        success: true, 
+        message: 'Requête envoyée au serveur MCP',
+        requestId: request.id
+      });
+    } catch (error) {
+      logWithTimestamp(`Erreur lors de l'envoi de la requête: ${error.message}`);
+      res.status(500).json({ error: error.message });
+    }
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -408,6 +516,25 @@ app.post('/api/request', (req, res) => {
 app.get('/api/response/:requestId', (req, res) => {
   try {
     const requestId = req.params.requestId;
+    
+    // Vérifier d'abord si une réponse est stockée
+    const storedResponse = getStoredResponse(requestId);
+    if (storedResponse) {
+      if (storedResponse.status === "processing") {
+        return res.json({
+          status: "processing",
+          message: "La requête est en cours de traitement"
+        });
+      }
+      
+      return res.json({
+        status: "completed",
+        result: storedResponse.result,
+        nextThoughtNeeded: storedResponse.nextThoughtNeeded
+      });
+    }
+    
+    // Si aucune réponse n'est stockée, rechercher dans les logs comme avant
     const tailLines = req.query.lines || 100;
     
     if (!fs.existsSync(OUTPUT_LOG)) {
@@ -444,6 +571,9 @@ app.get('/api/response/:requestId', (req, res) => {
           // Vérifier si l'ID correspond
           if (jsonObj.id === requestId) {
             response = jsonObj;
+            
+            // Stocker la réponse pour les futures requêtes
+            storeResponse(requestId, jsonObj);
             break;
           }
         }
@@ -457,8 +587,9 @@ app.get('/api/response/:requestId', (req, res) => {
     
     if (response) {
       res.json({
-        success: true,
-        response: response
+        status: "completed",
+        result: response.result,
+        nextThoughtNeeded: response.params?.arguments?.nextThoughtNeeded !== false
       });
     } else {
       res.status(404).json({
@@ -495,6 +626,24 @@ app.get('/api/logs', (req, res) => {
   }
 });
 
+// Endpoint pour vider le stockage des réponses (utile pour les tests)
+app.post('/api/clear-responses', (req, res) => {
+  try {
+    if (fs.existsSync(RESPONSES_FILE)) {
+      fs.unlinkSync(RESPONSES_FILE);
+      logWithTimestamp('Fichier de réponses supprimé');
+    }
+    fs.writeFileSync(RESPONSES_FILE, '{}');
+    
+    res.json({
+      success: true,
+      message: 'Stockage des réponses vidé'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Démarrer le serveur
 app.listen(PORT, () => {
   logWithTimestamp(`API MCP démarrée sur le port ${PORT}`);
@@ -502,6 +651,11 @@ app.listen(PORT, () => {
   // Initialiser le fichier de statut s'il n'existe pas
   if (!fs.existsSync(STATUS_FILE)) {
     updateStatus('initialized');
+  }
+  
+  // Initialiser le fichier de réponses s'il n'existe pas
+  if (!fs.existsSync(RESPONSES_FILE)) {
+    fs.writeFileSync(RESPONSES_FILE, '{}');
   }
 });
 

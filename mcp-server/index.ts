@@ -9,6 +9,29 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 // Fixed chalk import for ESM
 import chalk from 'chalk';
+import * as fs from 'fs';
+import * as path from 'path';
+
+// Configuration pour les logs
+const LOGS_DIR = '/tmp/mcp-logs';
+const SERVER_LOG = path.join(LOGS_DIR, 'server-debug.log');
+
+// Fonction pour écrire dans le fichier de log
+function logToFile(message: string): void {
+  // S'assurer que le répertoire existe
+  if (!fs.existsSync(LOGS_DIR)) {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+  }
+  
+  const timestamp = new Date().toISOString();
+  const logMessage = `[${timestamp}] ${message}\n`;
+  
+  // Ajouter au fichier de log
+  fs.appendFileSync(SERVER_LOG, logMessage);
+  
+  // Aussi afficher dans la console pour le debug
+  console.error(`[DEBUG] ${message}`);
+}
 
 interface ThoughtData {
   thought: string;
@@ -85,7 +108,9 @@ class SequentialThinkingServer {
 
   public processThought(input: unknown): { content: Array<{ type: string; text: string }>; isError?: boolean } {
     try {
+      logToFile(`Réception d'une requête de pensée: ${JSON.stringify(input)}`);
       const validatedInput = this.validateThoughtData(input);
+      logToFile(`Données de pensée validées: ${JSON.stringify(validatedInput)}`);
 
       if (validatedInput.thoughtNumber > validatedInput.totalThoughts) {
         validatedInput.totalThoughts = validatedInput.thoughtNumber;
@@ -98,29 +123,37 @@ class SequentialThinkingServer {
           this.branches[validatedInput.branchId] = [];
         }
         this.branches[validatedInput.branchId].push(validatedInput);
+        logToFile(`Ajouté à la branche ${validatedInput.branchId}`);
       }
 
       const formattedThought = this.formatThought(validatedInput);
       console.error(formattedThought);
 
+      const response = {
+        thoughtNumber: validatedInput.thoughtNumber,
+        totalThoughts: validatedInput.totalThoughts,
+        nextThoughtNeeded: validatedInput.nextThoughtNeeded,
+        branches: Object.keys(this.branches),
+        thoughtHistoryLength: this.thoughtHistory.length
+      };
+      
+      logToFile(`Envoi de la réponse: ${JSON.stringify(response)}`);
+      
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
-            thoughtNumber: validatedInput.thoughtNumber,
-            totalThoughts: validatedInput.totalThoughts,
-            nextThoughtNeeded: validatedInput.nextThoughtNeeded,
-            branches: Object.keys(this.branches),
-            thoughtHistoryLength: this.thoughtHistory.length
-          }, null, 2)
+          text: JSON.stringify(response, null, 2)
         }]
       };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logToFile(`ERREUR lors du traitement de la pensée: ${errorMessage}`);
+      
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage,
             status: 'failed'
           }, null, 2)
         }],
@@ -248,22 +281,35 @@ const server = new Server(
 
 const thinkingServer = new SequentialThinkingServer();
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [SEQUENTIAL_THINKING_TOOL],
-}));
+// Ajouter des logs au démarrage du serveur
+logToFile("Démarrage du serveur Sequential Thinking MCP");
+logToFile(`Version: 0.2.0`);
+logToFile(`Répertoire de logs: ${LOGS_DIR}`);
+
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  logToFile("Requête de liste des outils reçue");
+  return {
+    tools: [SEQUENTIAL_THINKING_TOOL],
+  };
+});
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  logToFile(`Requête d'appel d'outil reçue: ${JSON.stringify(request)}`);
+  
   if (request.params.name === "sequentialthinking") {
-    return thinkingServer.processThought(request.params.arguments);
+    logToFile(`Traitement de l'outil sequentialthinking avec les arguments: ${JSON.stringify(request.params.arguments)}`);
+    const result = thinkingServer.processThought(request.params.arguments);
+    
+    // Enregistrer l'ID de la requête dans les logs
+    if (request.params._meta?.progressToken) {
+      logToFile(`Traitement terminé pour la requête avec progressToken: ${request.params._meta.progressToken}`);
+    }
+    
+    return result;
   }
 
-  return {
-    content: [{
-      type: "text",
-      text: `Unknown tool: ${request.params.name}`
-    }],
-    isError: true
-  };
+  logToFile(`Outil non pris en charge: ${request.params.name}`);
+  throw new Error(`Outil non pris en charge: ${request.params.name}`);
 });
 
 async function runServer() {
