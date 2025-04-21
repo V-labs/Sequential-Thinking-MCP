@@ -2,8 +2,8 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-# Installation des dépendances pour mkfifo
-RUN apk add --no-cache coreutils
+# Installation des dépendances pour mkfifo et curl pour le healthcheck
+RUN apk add --no-cache coreutils curl
 
 # Copier les fichiers de l'application
 COPY package.json ./
