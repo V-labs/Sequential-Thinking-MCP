@@ -3,16 +3,17 @@ version: '3'
 services:
   mcp-server:
     build: ./mcp-server
-    container_name: mcp-server
     restart: unless-stopped
     stdin_open: true
     tty: true
     networks:
       - mcp-network
+    # Ajout de labels pour Traefik/Coolify
+    labels:
+      - "traefik.enable=true"
 
   mcp-api:
     build: ./mcp-api
-    container_name: mcp-api
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -32,6 +33,10 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    # Ajout de labels pour Traefik/Coolify
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.mcp-api.loadbalancer.server.port=3000"
 
 volumes:
   mcp-logs:

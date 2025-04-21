@@ -12,6 +12,7 @@ API_URL="http://localhost:3000" # URL locale par défaut, peut être changée av
 INTEGRATION_MODE="direct" # Mode d'intégration par défaut, peut être "n8n" avec -i
 TEST_MODE="basic" # Mode de test par défaut, peut être "advanced" avec -a
 REQUEST_ID="test-$(date +%s)"
+CURL_OPTS="" # Options curl par défaut, peut être modifié avec -k
 
 # Fonction pour afficher les messages
 echo_info() {
@@ -38,6 +39,7 @@ show_help() {
   echo "  -u, --url URL       URL de l'API MCP (défaut: http://localhost:3000)"
   echo "  -i, --integration   Simuler une intégration avec n8n"
   echo "  -a, --advanced      Exécuter des tests avancés"
+  echo "  -k, --insecure      Ignorer la vérification SSL"
   echo "  -h, --help          Afficher cette aide"
   echo ""
   echo "Exemples:"
@@ -45,6 +47,7 @@ show_help() {
   echo "  ./integration-test.sh -u https://mon-api.com  # Test avec une API distante"
   echo "  ./integration-test.sh -i                      # Simuler une intégration avec n8n"
   echo "  ./integration-test.sh -a                      # Tests avancés"
+  echo "  ./integration-test.sh -k                      # Ignorer la vérification SSL"
 }
 
 # Traiter les arguments
@@ -53,6 +56,7 @@ while [[ "$#" -gt 0 ]]; do
     -u|--url) API_URL="$2"; shift ;;
     -i|--integration) INTEGRATION_MODE="n8n" ;;
     -a|--advanced) TEST_MODE="advanced" ;;
+    -k|--insecure) CURL_OPTS="-k" ;;
     -h|--help) show_help; exit 0 ;;
     *) echo_error "Option inconnue: $1"; show_help; exit 1 ;;
   esac
@@ -91,7 +95,7 @@ prepare_test_env() {
 check_api_status() {
   echo_info "Vérification du statut de l'API MCP..."
   
-  RESPONSE=$(curl -s $API_URL/api/status)
+  RESPONSE=$(curl $CURL_OPTS -s $API_URL/api/status)
   
   if [ $? -ne 0 ]; then
     echo_error "Impossible de se connecter à l'API MCP. Est-elle démarrée?"
@@ -118,7 +122,7 @@ start_server() {
   if [ "$IS_RUNNING" = false ]; then
     echo_info "Démarrage du serveur MCP via l'API..."
     
-    RESPONSE=$(curl -s -X POST $API_URL/api/start)
+    RESPONSE=$(curl $CURL_OPTS -s -X POST $API_URL/api/start)
     
     echo $RESPONSE > ./test-results/start_response.json
     
@@ -145,7 +149,7 @@ send_direct_request() {
   REQUEST_ID="direct-test-$(date +%s)"
   
   # Envoyer la requête
-  RESPONSE=$(curl -s -X POST \
+  RESPONSE=$(curl $CURL_OPTS -s -X POST \
     -H "Content-Type: application/json" \
     -d '{
       "jsonrpc": "2.0",
@@ -178,14 +182,14 @@ send_direct_request() {
   sleep 5
   
   # Récupérer la réponse
-  RESPONSE=$(curl -s $API_URL/api/response/$REQUEST_ID)
+  RESPONSE=$(curl $CURL_OPTS -s $API_URL/api/response/$REQUEST_ID)
   echo $RESPONSE > ./test-results/direct_response.json
   
   if echo $RESPONSE | grep -q "success"; then
     echo_success "Réponse reçue avec succès"
   else
     echo_warning "Pas de réponse immédiate, cela peut prendre plus de temps"
-    echo_info "Vous pouvez vérifier manuellement avec: curl -s $API_URL/api/response/$REQUEST_ID"
+    echo_info "Vous pouvez vérifier manuellement avec: curl $CURL_OPTS -s $API_URL/api/response/$REQUEST_ID"
   fi
 }
 
@@ -207,7 +211,7 @@ simulate_n8n_integration() {
   N8N_REQUEST_ID="n8n-test-$(date +%s)"
   
   # Première pensée
-  RESPONSE=$(curl -s -X POST \
+  RESPONSE=$(curl $CURL_OPTS -s -X POST \
     -H "Content-Type: application/json" \
     -d '{
       "jsonrpc": "2.0",
@@ -235,7 +239,7 @@ simulate_n8n_integration() {
   sleep 3
   
   # Deuxième pensée
-  RESPONSE=$(curl -s -X POST \
+  RESPONSE=$(curl $CURL_OPTS -s -X POST \
     -H "Content-Type: application/json" \
     -d '{
       "jsonrpc": "2.0",
@@ -262,7 +266,7 @@ simulate_n8n_integration() {
   sleep 3
   
   # Troisième pensée
-  RESPONSE=$(curl -s -X POST \
+  RESPONSE=$(curl $CURL_OPTS -s -X POST \
     -H "Content-Type: application/json" \
     -d '{
       "jsonrpc": "2.0",
@@ -296,7 +300,7 @@ simulate_n8n_integration() {
     # n8n traiterait et formaterait la requête, puis l'enverrait à l'API MCP
     WEBHOOK_ID="webhook-$(date +%s)"
     
-    RESPONSE=$(curl -s -X POST \
+    RESPONSE=$(curl $CURL_OPTS -s -X POST \
       -H "Content-Type: application/json" \
       -d '{
         "jsonrpc": "2.0",
@@ -326,7 +330,7 @@ simulate_n8n_integration() {
 check_api_logs() {
   echo_info "Vérification des logs de l'API MCP..."
   
-  RESPONSE=$(curl -s $API_URL/api/logs)
+  RESPONSE=$(curl $CURL_OPTS -s $API_URL/api/logs)
   
   if [ $? -eq 0 ]; then
     echo_success "Logs récupérés avec succès"
@@ -340,7 +344,7 @@ check_api_logs() {
 stop_server() {
   echo_info "Arrêt du serveur MCP..."
   
-  RESPONSE=$(curl -s -X POST $API_URL/api/stop)
+  RESPONSE=$(curl $CURL_OPTS -s -X POST $API_URL/api/stop)
   
   if echo $RESPONSE | grep -q "success"; then
     echo_success "Signal d'arrêt envoyé au serveur MCP"
@@ -352,7 +356,7 @@ stop_server() {
   sleep 3
   
   # Vérifier si le serveur est arrêté
-  RESPONSE=$(curl -s $API_URL/api/status)
+  RESPONSE=$(curl $CURL_OPTS -s $API_URL/api/status)
   
   if echo $RESPONSE | grep -q "\"isRunning\":false"; then
     echo_success "Le serveur MCP s'est arrêté correctement"
