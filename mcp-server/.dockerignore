@@ -1,0 +1,17 @@
+# Fichiers et dossiers de Git
+.git
+.gitignore
+
+# Dossiers de dépendances
+node_modules
+npm-debug.log
+dist
+
+# Autres fichiers
+.DS_Store
+*.log
+*.md
+!README.md
+
+# Fichiers Docker
+.dockerignore 

@@ -1,0 +1,46 @@
+version: '3'
+
+services:
+  mcp-server:
+    build: ./mcp-server
+    container_name: mcp-server
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    networks:
+      - mcp-network
+
+  mcp-api:
+    build: ./mcp-api
+    container_name: mcp-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - mcp-logs:/tmp/mcp-logs
+    depends_on:
+      - mcp-server
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # Configurer CORS pour autoriser les appels externes (peut être plus restrictif en production)
+      - CORS_ALLOW_ORIGIN=*
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  mcp-logs:
+    driver: local
+
+networks:
+  mcp-network:
+    driver: bridge
+    # Si vous avez besoin de vous connecter à un réseau externe (comme celui de n8n)
+    # décommentez les lignes suivantes et remplacez "nom_du_reseau_externe" par le nom du réseau
+    # external:
+    #   name: nom_du_reseau_externe 

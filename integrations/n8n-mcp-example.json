@@ -1,0 +1,471 @@
+{
+  "name": "MCP Server - Surveillance et interactivité",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "1",
+      "name": "Vérifier toutes les 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cat /tmp/mcp-logs/status.json 2>/dev/null || echo '{\"status\":\"not_running\"}'"
+      },
+      "id": "2",
+      "name": "Vérifier statut MCP",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse le statut JSON\nlet statusData;\ntry {\n  statusData = JSON.parse($input.first().json.stdout);\n} catch(e) {\n  statusData = { status: 'invalid_status_file' };\n}\n\n// Vérifier l'âge du statut si la timestamp existe\nlet needsRestart = false;\nlet reason = '';\n\nif (statusData.status === 'not_running' || statusData.status === 'invalid_status_file') {\n  needsRestart = true;\n  reason = `Statut: ${statusData.status}`;\n} else if (statusData.status === 'exited') {\n  needsRestart = true;\n  reason = `Serveur arrêté, code: ${statusData.exitCode || 'inconnu'}`;\n} else if (statusData.timestamp) {\n  // Vérifier si la dernière mise à jour est trop ancienne (plus de 10 minutes)\n  const lastUpdate = new Date(statusData.timestamp);\n  const now = new Date();\n  const ageInMinutes = (now - lastUpdate) / 1000 / 60;\n  \n  if (ageInMinutes > 10) {\n    needsRestart = true;\n    reason = `Dernière activité il y a ${ageInMinutes.toFixed(1)} minutes`;\n  }\n}\n\nreturn [\n  {\n    json: {\n      statusData,\n      needsRestart,\n      reason\n    }\n  }\n];"
+      },
+      "id": "3",
+      "name": "Analyser statut",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$node[\"Analyser statut\"].json[\"needsRestart\"]}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "4",
+      "name": "Redémarrage nécessaire?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        850,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "nohup node /chemin/vers/mcp-wrapper.js > /tmp/mcp-wrapper.log 2>&1 &"
+      },
+      "id": "5",
+      "name": "Démarrer serveur MCP",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://hooks.slack.com/services/YOUR_SLACK_WEBHOOK_URL",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "=Le serveur MCP a été redémarré. Raison: {{$node[\"Analyser statut\"].json[\"reason\"]}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6",
+      "name": "Notifier redémarrage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Le serveur fonctionne correctement, ne rien faire\nreturn [\n  {\n    json: {\n      status: 'OK',\n      message: 'Le serveur MCP fonctionne normalement'\n    }\n  }\n];"
+      },
+      "id": "7",
+      "name": "Serveur OK",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 30
+            }
+          ]
+        }
+      },
+      "id": "8",
+      "name": "Envoi requête périodique",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        250,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "command": "echo '{\"jsonrpc\":\"2.0\",\"method\":\"callTool\",\"params\":{\"name\":\"sequentialthinking\",\"arguments\":{\"thought\":\"Vérification du fonctionnement du serveur\",\"thoughtNumber\":1,\"totalThoughts\":1,\"nextThoughtNeeded\":false}},\"id\":\"healthcheck-{{$now.timestamp}}\"}' > /tmp/mcp-logs/mcp-input.fifo"
+      },
+      "id": "9",
+      "name": "Envoyer requête de test",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        450,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "command": "tail -n 50 /tmp/mcp-logs/mcp-output.log | grep healthcheck"
+      },
+      "id": "10",
+      "name": "Vérifier réponse",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        650,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$node[\"Vérifier réponse\"].json[\"stdout\"]}}",
+              "operation": "isEmpty"
+            }
+          ]
+        }
+      },
+      "id": "11",
+      "name": "Réponse reçue?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        850,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "command": "echo \"Serveur MCP inactif ou bloqué, tentative de redémarrage\" && nohup node /chemin/vers/mcp-wrapper.js > /tmp/mcp-wrapper.log 2>&1 &"
+      },
+      "id": "12",
+      "name": "Redémarrer (pas de réponse)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Le serveur a répondu à la requête de healthcheck\nreturn [\n  {\n    json: {\n      status: 'OK',\n      message: 'Le serveur MCP a répondu à la requête de test',\n      response: $input.first().json.stdout\n    }\n  }\n];"
+      },
+      "id": "13",
+      "name": "Serveur répond",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mcp/sequentialthinking",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "14",
+      "name": "Webhook pour requête",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Récupérer la requête depuis le webhook\nconst mcpRequest = $input.first().json;\n\n// Formater la requête avec jsonrpc pour le serveur MCP\nconst requestBody = {\n  jsonrpc: \"2.0\",\n  method: \"callTool\",\n  params: {\n    name: \"sequentialthinking\",\n    arguments: {\n      thought: mcpRequest.thought || \"Pensée par défaut\",\n      thoughtNumber: mcpRequest.thoughtNumber || 1,\n      totalThoughts: mcpRequest.totalThoughts || 1,\n      nextThoughtNeeded: mcpRequest.nextThoughtNeeded !== undefined ? mcpRequest.nextThoughtNeeded : false,\n      ...mcpRequest.additionalParams\n    }\n  },\n  id: mcpRequest.id || `req-${Date.now()}`\n};\n\nreturn [\n  {\n    json: {\n      formattedRequest: JSON.stringify(requestBody),\n      originalRequest: mcpRequest\n    }\n  }\n];"
+      },
+      "id": "15",
+      "name": "Formater requête MCP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        450,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=echo '{{$node[\"Formater requête MCP\"].json[\"formattedRequest\"]}}' > /tmp/mcp-logs/mcp-input.fifo"
+      },
+      "id": "16",
+      "name": "Envoyer au serveur MCP",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        650,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "command": "sleep 1 && tail -n 20 /tmp/mcp-logs/mcp-output.log"
+      },
+      "id": "17",
+      "name": "Lire réponse",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        850,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extraire la réponse JSON de la sortie\nconst output = $input.first().json.stdout;\nlet response;\n\ntry {\n  // Essayer de trouver un objet JSON dans la sortie\n  const jsonStart = output.indexOf('{');\n  if (jsonStart >= 0) {\n    const jsonPart = output.substring(jsonStart);\n    response = JSON.parse(jsonPart);\n  } else {\n    response = { error: \"Aucune réponse JSON trouvée\" };\n  }\n} catch (error) {\n  response = { \n    error: \"Erreur lors du parsing de la réponse\", \n    details: error.message,\n    rawOutput: output\n  };\n}\n\nreturn [\n  {\n    json: response\n  }\n];"
+      },
+      "id": "18",
+      "name": "Parser réponse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        900
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "19",
+      "name": "Répondre au webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        900
+      ]
+    }
+  ],
+  "connections": {
+    "Vérifier toutes les 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Vérifier statut MCP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vérifier statut MCP": {
+      "main": [
+        [
+          {
+            "node": "Analyser statut",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyser statut": {
+      "main": [
+        [
+          {
+            "node": "Redémarrage nécessaire?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Redémarrage nécessaire?": {
+      "main": [
+        [
+          {
+            "node": "Démarrer serveur MCP",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Serveur OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Démarrer serveur MCP": {
+      "main": [
+        [
+          {
+            "node": "Notifier redémarrage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envoi requête périodique": {
+      "main": [
+        [
+          {
+            "node": "Envoyer requête de test",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envoyer requête de test": {
+      "main": [
+        [
+          {
+            "node": "Vérifier réponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vérifier réponse": {
+      "main": [
+        [
+          {
+            "node": "Réponse reçue?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Réponse reçue?": {
+      "main": [
+        [
+          {
+            "node": "Redémarrer (pas de réponse)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Serveur répond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook pour requête": {
+      "main": [
+        [
+          {
+            "node": "Formater requête MCP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formater requête MCP": {
+      "main": [
+        [
+          {
+            "node": "Envoyer au serveur MCP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envoyer au serveur MCP": {
+      "main": [
+        [
+          {
+            "node": "Lire réponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire réponse": {
+      "main": [
+        [
+          {
+            "node": "Parser réponse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parser réponse": {
+      "main": [
+        [
+          {
+            "node": "Répondre au webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+} 
